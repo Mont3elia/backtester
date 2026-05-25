@@ -5,3 +5,4 @@ plotly>=5.18.0
 yfinance>=0.2.36
 ccxt>=4.2.0
 scipy>=1.11.0
+streamlit-ace>=0.1.1

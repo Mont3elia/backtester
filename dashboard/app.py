@@ -1,6 +1,7 @@
 import sys
 import os
 from datetime import date, timedelta
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -11,6 +12,13 @@ import streamlit as st
 from data.data_manager import DataManager
 from engine.backtester import Backtester
 from strategies.registry import discover, get_all
+from strategies.base_strategy import BaseStrategy
+
+try:
+    from streamlit_ace import st_ace
+    _ACE_AVAILABLE = True
+except ImportError:
+    _ACE_AVAILABLE = False
 
 st.set_page_config(
     page_title="Backtester Pro",
@@ -38,13 +46,93 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Run strategy discovery once at module load (cached by _registry)
+# Always discover strategies at module load so custom ones are always registered
 discover()
 
+CUSTOM_DIR = Path(__file__).parent.parent / "strategies" / "custom"
+
+TEMPLATE = '''\
+from strategies.base_strategy import BaseStrategy
+
+class MiaStrategia(BaseStrategy):
+    name = "Mia Strategia"
+    description = "Descrizione breve della strategia"
+    param_schema = {
+        "period": {"type": "int", "default": 20, "min": 2, "max": 200, "label": "Periodo"},
+        "threshold": {"type": "float", "default": 0.5, "min": 0.0, "max": 5.0, "label": "Soglia"},
+    }
+
+    def on_bar(self, bar, portfolio):
+        # bar è un pd.Series con: open, high, low, close, volume
+        # self.prices è una lista dei prezzi close visti finora
+        # self.period, self.threshold sono accessibili direttamente
+        #
+        # Per comprare:  self.buy(quantity)
+        # Per vendere:   self.sell(quantity)
+        # Per chiudere:  self.close_position()
+
+        self.prices.append(bar["close"])
+
+        if len(self.prices) < self.period:
+            return
+
+        # Esempio: media mobile semplice
+        sma = sum(self.prices[-self.period:]) / self.period
+        current_price = bar["close"]
+
+        # Logica di esempio: compra se prezzo sotto la media, vendi se sopra
+        position = portfolio.positions.get(self.symbol)
+
+        if current_price < sma * (1 - self.threshold / 100) and not position:
+            self.buy(1)
+        elif current_price > sma and position and position.is_open():
+            self.close_position()
+'''
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _validate_code(code: str):
+    """
+    Execute the code string and return the first BaseStrategy subclass found,
+    or raise ValueError with a human-readable message.
+    """
+    namespace = {}
+    try:
+        exec(code, namespace)  # noqa: S102
+    except Exception as exc:
+        raise ValueError(f"Errore di esecuzione: {exc}") from exc
+
+    cls = None
+    for obj in namespace.values():
+        if (
+            isinstance(obj, type)
+            and issubclass(obj, BaseStrategy)
+            and obj is not BaseStrategy
+        ):
+            cls = obj
+            break
+
+    if cls is None:
+        raise ValueError("Nessuna classe che eredita da BaseStrategy trovata.")
+
+    return cls
+
+
+def _list_custom_files():
+    """Return sorted list of .py files in strategies/custom/ (excluding __init__)."""
+    return sorted(
+        p for p in CUSTOM_DIR.glob("*.py") if p.name != "__init__.py"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Backtest page helpers (unchanged from original)
+# ---------------------------------------------------------------------------
 
 def sidebar_config():
-    st.sidebar.title("Backtester Pro")
-
     st.sidebar.header("Dati")
     market_label = st.sidebar.selectbox(
         "Mercato",
@@ -300,7 +388,11 @@ def display_results(result: dict, data: pd.DataFrame, capital: float):
         st.dataframe(df_metrics, use_container_width=True, hide_index=True)
 
 
-def main():
+# ---------------------------------------------------------------------------
+# Pages
+# ---------------------------------------------------------------------------
+
+def show_backtest_page():
     config = sidebar_config()
 
     st.title("Backtester Pro")
@@ -351,6 +443,129 @@ def main():
             return
 
     display_results(result, data, float(config["capital"]))
+
+
+def show_editor_page():
+    st.title("Editor Strategie")
+    st.caption("Scrivi strategie Python personalizzate. Appaiono subito nel menu Backtest.")
+
+    col_list, col_editor = st.columns([1, 2])
+
+    # ------------------------------------------------------------------
+    # Left column: list of saved custom strategies
+    # ------------------------------------------------------------------
+    with col_list:
+        st.subheader("Le tue strategie")
+
+        custom_files = _list_custom_files()
+
+        if not custom_files:
+            st.info("Nessuna strategia custom salvata.")
+        else:
+            for path in custom_files:
+                strategy_name = path.stem
+                col_name, col_btn = st.columns([3, 1])
+                col_name.write(strategy_name)
+                if col_btn.button("Elimina", key=f"delete_{strategy_name}"):
+                    path.unlink(missing_ok=True)
+                    discover()
+                    st.rerun()
+
+        st.warning(
+            "Le strategie salvate qui persistono finché l'app è in esecuzione. "
+            "Per renderle permanenti, scaricale e aggiungile al repository GitHub."
+        )
+
+    # ------------------------------------------------------------------
+    # Right column: editor
+    # ------------------------------------------------------------------
+    with col_editor:
+        st.subheader("Nuova Strategia")
+
+        if _ACE_AVAILABLE:
+            code = st_ace(
+                value=TEMPLATE,
+                language="python",
+                theme="monokai",
+                height=500,
+                font_size=14,
+                key="strategy_editor",
+            )
+        else:
+            st.info(
+                "streamlit-ace non installato. Uso editor di testo standard. "
+                "Installa con: pip install streamlit-ace"
+            )
+            code = st.text_area(
+                "Codice strategia",
+                value=TEMPLATE,
+                height=500,
+                key="strategy_editor_fallback",
+            )
+
+        btn_col1, btn_col2 = st.columns(2)
+
+        # ---- Validate ----
+        with btn_col1:
+            if st.button("Valida", use_container_width=True):
+                if not code or not code.strip():
+                    st.error("L'editor è vuoto.")
+                else:
+                    try:
+                        cls = _validate_code(code)
+                        st.success(
+                            f"Strategia '{cls.name}' valida! "
+                            f"Parametri: {list(cls.param_schema.keys())}"
+                        )
+                    except ValueError as exc:
+                        st.error(str(exc))
+
+        # ---- Save ----
+        with btn_col2:
+            if st.button("Salva Strategia", use_container_width=True):
+                if not code or not code.strip():
+                    st.error("L'editor è vuoto.")
+                else:
+                    try:
+                        cls = _validate_code(code)
+                        dest = CUSTOM_DIR / f"{cls.__name__}.py"
+                        dest.write_text(code, encoding="utf-8")
+                        discover()
+                        st.success(
+                            f"Strategia '{cls.name}' salvata! "
+                            "Torna al Backtest per usarla."
+                        )
+                        st.download_button(
+                            "Download .py",
+                            data=code,
+                            file_name=f"{cls.__name__}.py",
+                            mime="text/plain",
+                        )
+                    except ValueError as exc:
+                        st.error(str(exc))
+                    except Exception as exc:
+                        st.error(f"Errore nel salvataggio: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def main():
+    # Always re-discover so custom strategies are picked up on every run
+    discover()
+
+    st.sidebar.title("Backtester Pro")
+    page = st.sidebar.radio(
+        "Navigazione",
+        ["Backtest", "Editor Strategie"],
+        label_visibility="collapsed",
+    )
+
+    if page == "Backtest":
+        show_backtest_page()
+    elif page == "Editor Strategie":
+        show_editor_page()
 
 
 if __name__ == "__main__":
