@@ -710,6 +710,199 @@ def show_editor_page():
 
 
 # ---------------------------------------------------------------------------
+# Optimizer page
+# ---------------------------------------------------------------------------
+
+def show_optimizer_page():
+    st.title("Ottimizzazione AI")
+    st.caption(
+        "L'AI genera una strategia, esegue il backtest, analizza i risultati e migliora autonomamente. "
+        "Ripete per il numero di iterazioni scelto e ti mostra la versione migliore."
+    )
+
+    with st.form("optimizer_form"):
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            market_label = st.selectbox("Mercato", ["Azioni", "Crypto", "Forex", "Futures"], key="opt_market")
+            symbol = st.text_input("Simbolo", value="AAPL", key="opt_symbol")
+            exchange = st.selectbox("Exchange (solo Crypto)", ["binance", "coinbase", "kraken"], key="opt_exchange")
+
+        with col2:
+            objective = st.selectbox(
+                "Obiettivo da massimizzare",
+                ["Sharpe Ratio", "Profitto Totale (%)", "Min Drawdown", "Win Rate (%)"],
+                key="opt_objective",
+            )
+            iterations = st.slider("Numero di iterazioni", min_value=3, max_value=10, value=5, key="opt_iter")
+            capital = st.number_input(
+                "Capitale iniziale ($)", min_value=100, max_value=1_000_000, value=10_000, step=500, key="opt_capital"
+            )
+
+        with col3:
+            default_end = date.today()
+            default_start = default_end - timedelta(days=730)
+            start_date = st.date_input("Data inizio", value=default_start, key="opt_start")
+            end_date = st.date_input("Data fine", value=default_end, key="opt_end")
+
+        submitted = st.form_submit_button("Avvia Ottimizzazione", type="primary", use_container_width=True)
+
+    if submitted:
+        market_map = {"Azioni": "stock", "Crypto": "crypto", "Forex": "forex", "Futures": "futures"}
+        market = market_map[market_label]
+
+        def get_score(m: dict) -> float:
+            if objective == "Sharpe Ratio":
+                return m["sharpe_ratio"]
+            elif objective == "Profitto Totale (%)":
+                return m["total_return"]
+            elif objective == "Min Drawdown":
+                return m["max_drawdown"]  # negative number, closer to 0 = better
+            else:
+                return m["win_rate"]
+
+        with st.spinner("Caricamento dati storici..."):
+            try:
+                dm = DataManager()
+                data = dm.get(
+                    symbol=symbol,
+                    market=market,
+                    start=str(start_date),
+                    end=str(end_date),
+                    interval="1d",
+                    exchange=exchange,
+                )
+            except Exception as exc:
+                st.error(f"Errore nel caricamento dati: {exc}")
+                return
+
+        if data.empty:
+            st.error("Dati non disponibili. Verificare simbolo e date.")
+            return
+
+        st.success(f"Dati caricati: {len(data)} barre ({data.index[0].date()} → {data.index[-1].date()})")
+
+        progress_bar = st.progress(0.0)
+        status_ph = st.empty()
+        table_ph = st.empty()
+
+        history: list = []
+        best_code: str | None = None
+        best_score = -float("inf")
+        best_metrics: dict | None = None
+
+        empty_metrics = {
+            "sharpe_ratio": 0.0, "total_return": 0.0, "max_drawdown": 0.0,
+            "win_rate": 0.0, "total_trades": 0, "profit_factor": 0.0, "cagr": 0.0,
+        }
+
+        status_ph.info("L'AI sta generando la strategia iniziale...")
+        try:
+            from dashboard.ai_generator import (
+                generate_initial_strategy_for_optimization,
+                improve_strategy as ai_improve,
+            )
+            code = generate_initial_strategy_for_optimization(symbol, objective, market_label)
+        except ValueError as exc:
+            st.error(str(exc))
+            return
+        except Exception as exc:
+            st.error(f"Errore nella generazione della strategia iniziale: {exc}")
+            return
+
+        for i in range(iterations):
+            progress_bar.progress(i / iterations, text=f"Iterazione {i + 1}/{iterations}: backtest in corso...")
+            status_ph.info(f"**Iterazione {i + 1}/{iterations}** — backtest in corso...")
+
+            try:
+                cls = _validate_code(code)
+                strategy = cls(symbol=symbol)
+                bt = Backtester(initial_capital=float(capital), commission=0.001, slippage=0.0005)
+                result = bt.run(data, strategy)
+                metrics = result["metrics"]
+                score = get_score(metrics)
+                ok = True
+            except Exception:
+                metrics = dict(empty_metrics)
+                score = -float("inf")
+                ok = False
+
+            history.append({"iteration": i, "code": code, "metrics": metrics, "score": score, "ok": ok})
+
+            if ok and score > best_score:
+                best_score = score
+                best_code = code
+                best_metrics = metrics
+
+            rows = []
+            for h in history:
+                m = h["metrics"]
+                rows.append({
+                    "Iter": h["iteration"] + 1,
+                    "Stato": "✅" if h["ok"] else "❌",
+                    "Sharpe": round(m["sharpe_ratio"], 3),
+                    "Return (%)": round(m["total_return"], 2),
+                    "Drawdown (%)": round(m["max_drawdown"], 2),
+                    "Win Rate (%)": round(m["win_rate"], 1),
+                    "Trade": m["total_trades"],
+                })
+            table_ph.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+            if i < iterations - 1:
+                progress_bar.progress((i + 0.6) / iterations, text=f"Iterazione {i + 1}/{iterations}: AI migliora la strategia...")
+                status_ph.info(f"**Iterazione {i + 1}/{iterations}** — l'AI sta analizzando e migliorando...")
+                try:
+                    code = ai_improve(code, metrics, objective, i, history)
+                except Exception as exc:
+                    st.warning(f"Errore nella generazione iterazione {i + 2}: {exc}")
+                    break
+
+        progress_bar.progress(1.0, text="Ottimizzazione completata!")
+        if best_code:
+            status_ph.success(f"Ottimizzazione completata! Miglior {objective}: **{best_score:.3f}**")
+            st.session_state["optimizer_best_code"] = best_code
+            st.session_state["optimizer_best_metrics"] = best_metrics
+        else:
+            status_ph.error("Nessuna iterazione valida. Verifica simbolo e periodo.")
+
+    if st.session_state.get("optimizer_best_code"):
+        st.markdown("---")
+        st.subheader("Migliore Strategia Trovata")
+
+        bm = st.session_state.get("optimizer_best_metrics") or {}
+        if bm:
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                st.metric("Sharpe Ratio", f"{bm.get('sharpe_ratio', 0):.3f}")
+            with c2:
+                st.metric("Total Return", f"{bm.get('total_return', 0):+.2f}%")
+            with c3:
+                st.metric("Max Drawdown", f"{bm.get('max_drawdown', 0):.2f}%")
+            with c4:
+                st.metric("Win Rate", f"{bm.get('win_rate', 0):.1f}%")
+
+        best_code = st.session_state["optimizer_best_code"]
+
+        if _ACE_AVAILABLE:
+            code_to_save = st_ace(
+                value=best_code,
+                language="python",
+                theme="monokai",
+                height=420,
+                key="optimizer_best_editor",
+            )
+        else:
+            code_to_save = st.text_area(
+                "Codice della migliore strategia",
+                value=best_code,
+                height=420,
+                key="optimizer_best_editor_fb",
+            )
+
+        _render_validate_save(code_to_save, "optimizer")
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -720,7 +913,7 @@ def main():
     st.sidebar.title("Backtester Pro")
     page = st.sidebar.radio(
         "Navigazione",
-        ["Backtest", "Editor Strategie"],
+        ["Backtest", "Editor Strategie", "Ottimizzazione AI"],
         label_visibility="collapsed",
     )
 
@@ -728,6 +921,8 @@ def main():
         show_backtest_page()
     elif page == "Editor Strategie":
         show_editor_page()
+    elif page == "Ottimizzazione AI":
+        show_optimizer_page()
 
 
 if __name__ == "__main__":

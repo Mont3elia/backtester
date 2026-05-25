@@ -127,3 +127,87 @@ Genera il codice Python completo della strategia."""
     )
 
     return _strip_markdown(message.content[0].text)
+
+
+def generate_initial_strategy_for_optimization(symbol: str, objective: str, market: str) -> str:
+    """Genera la strategia di partenza per il loop di ottimizzazione AI."""
+    api_key = get_api_key()
+    if not api_key:
+        raise ValueError(
+            "API key Anthropic non configurata. Vai nelle impostazioni dell'app su "
+            "Streamlit Cloud → Secrets e aggiungi ANTHROPIC_API_KEY."
+        )
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    prompt = f"""Genera una strategia di trading di partenza per un'ottimizzazione automatica iterativa.
+
+Simbolo: {symbol}
+Mercato: {market}
+Obiettivo da massimizzare: {objective}
+
+Crea una strategia robusta con indicatori classici (RSI, SMA, MACD o Bollinger Bands).
+Includi parametri ben definiti nel param_schema.
+La strategia deve generare almeno qualche trade su 2 anni di dati giornalieri.
+Genera SOLO il codice Python completo."""
+
+    message = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=2000,
+        system=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    return _strip_markdown(message.content[0].text)
+
+
+def improve_strategy(code: str, metrics: dict, objective: str, iteration: int, history: list) -> str:
+    """Analizza i risultati del backtest e genera una versione migliorata della strategia."""
+    api_key = get_api_key()
+    if not api_key:
+        raise ValueError(
+            "API key Anthropic non configurata. Vai nelle impostazioni dell'app su "
+            "Streamlit Cloud → Secrets e aggiungi ANTHROPIC_API_KEY."
+        )
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    history_text = ""
+    if len(history) > 1:
+        history_text = "\n\nCRONOLOGIA ITERAZIONI PRECEDENTI:\n"
+        for h in history[:-1]:
+            m = h["metrics"]
+            history_text += (
+                f"  Iter {h['iteration'] + 1}: Sharpe={m['sharpe_ratio']:.3f}, "
+                f"Return={m['total_return']:+.1f}%, "
+                f"Drawdown={m['max_drawdown']:.1f}%, "
+                f"WinRate={m['win_rate']:.0f}%, "
+                f"Trade={m['total_trades']}\n"
+            )
+
+    prompt = f"""Stai ottimizzando una strategia di trading (iterazione {iteration + 1}).
+Obiettivo: massimizzare {objective}
+
+CODICE CORRENTE:
+{code}
+
+RISULTATI BACKTEST CORRENTI:
+- Sharpe Ratio: {metrics['sharpe_ratio']:.3f}
+- Total Return: {metrics['total_return']:+.2f}%
+- Max Drawdown: {metrics['max_drawdown']:.2f}%
+- Win Rate: {metrics['win_rate']:.1f}%
+- Trade totali: {metrics['total_trades']}
+- Profit Factor: {metrics['profit_factor']:.3f}
+{history_text}
+Analizza cosa non funziona e genera una versione MIGLIORATA.
+Puoi cambiare parametri, indicatori, logica entrata/uscita, aggiungere filtri o gestione del rischio.
+Genera SOLO il codice Python completo, niente spiegazioni."""
+
+    message = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=2000,
+        system=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    return _strip_markdown(message.content[0].text)
