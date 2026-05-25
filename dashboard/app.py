@@ -445,6 +445,51 @@ def show_backtest_page():
     display_results(result, data, float(config["capital"]))
 
 
+def _render_validate_save(code: str, key_suffix: str):
+    """Helper riutilizzabile: bottoni Valida + Salva + Download per un blocco di codice."""
+    btn_col1, btn_col2 = st.columns(2)
+
+    with btn_col1:
+        if st.button("Valida", key=f"validate_{key_suffix}", use_container_width=True):
+            if not code or not code.strip():
+                st.error("L'editor è vuoto.")
+            else:
+                try:
+                    cls = _validate_code(code)
+                    st.success(
+                        f"Strategia '{cls.name}' valida! "
+                        f"Parametri: {list(cls.param_schema.keys())}"
+                    )
+                except ValueError as exc:
+                    st.error(str(exc))
+
+    with btn_col2:
+        if st.button("Salva Strategia", key=f"save_{key_suffix}", type="primary", use_container_width=True):
+            if not code or not code.strip():
+                st.error("L'editor è vuoto.")
+            else:
+                try:
+                    cls = _validate_code(code)
+                    dest = CUSTOM_DIR / f"{cls.__name__}.py"
+                    dest.write_text(code, encoding="utf-8")
+                    discover()
+                    st.success(
+                        f"Strategia '{cls.name}' salvata! "
+                        "Torna al Backtest per usarla."
+                    )
+                    st.download_button(
+                        "Download .py",
+                        data=code,
+                        file_name=f"{cls.__name__}.py",
+                        mime="text/plain",
+                        key=f"download_{key_suffix}",
+                    )
+                except ValueError as exc:
+                    st.error(str(exc))
+                except Exception as exc:
+                    st.error(f"Errore nel salvataggio: {exc}")
+
+
 def show_editor_page():
     st.title("Editor Strategie")
     st.caption("Scrivi strategie Python personalizzate. Appaiono subito nel menu Backtest.")
@@ -477,74 +522,191 @@ def show_editor_page():
         )
 
     # ------------------------------------------------------------------
-    # Right column: editor
+    # Right column: three tabs — Codice / Descrizione AI / Wizard
     # ------------------------------------------------------------------
     with col_editor:
         st.subheader("Nuova Strategia")
 
-        if _ACE_AVAILABLE:
-            code = st_ace(
-                value=TEMPLATE,
-                language="python",
-                theme="monokai",
-                height=500,
-                font_size=14,
-                key="strategy_editor",
-            )
-        else:
+        tab_code, tab_ai, tab_wizard = st.tabs(["✏️ Codice", "🤖 Descrizione AI", "🧙 Wizard"])
+
+        # ---- Tab 1: editor manuale ----
+        with tab_code:
             st.info(
-                "streamlit-ace non installato. Uso editor di testo standard. "
-                "Installa con: pip install streamlit-ace"
-            )
-            code = st.text_area(
-                "Codice strategia",
-                value=TEMPLATE,
-                height=500,
-                key="strategy_editor_fallback",
+                "Scrivi la tua strategia. "
+                "Usa self.buy(1), self.sell(1), self.close_position(). "
+                "I prezzi close sono in self.prices."
             )
 
-        btn_col1, btn_col2 = st.columns(2)
+            if _ACE_AVAILABLE:
+                code_manual = st_ace(
+                    value=TEMPLATE,
+                    language="python",
+                    theme="monokai",
+                    height=500,
+                    font_size=14,
+                    key="strategy_editor",
+                )
+            else:
+                st.info(
+                    "streamlit-ace non installato. Uso editor di testo standard. "
+                    "Installa con: pip install streamlit-ace"
+                )
+                code_manual = st.text_area(
+                    "Codice strategia",
+                    value=TEMPLATE,
+                    height=500,
+                    key="strategy_editor_fallback",
+                )
 
-        # ---- Validate ----
-        with btn_col1:
-            if st.button("Valida", use_container_width=True):
-                if not code or not code.strip():
-                    st.error("L'editor è vuoto.")
-                else:
-                    try:
-                        cls = _validate_code(code)
-                        st.success(
-                            f"Strategia '{cls.name}' valida! "
-                            f"Parametri: {list(cls.param_schema.keys())}"
-                        )
-                    except ValueError as exc:
-                        st.error(str(exc))
+            _render_validate_save(code_manual, "manual")
 
-        # ---- Save ----
-        with btn_col2:
-            if st.button("Salva Strategia", use_container_width=True):
-                if not code or not code.strip():
-                    st.error("L'editor è vuoto.")
+        # ---- Tab 2: descrizione libera → AI ----
+        with tab_ai:
+            st.subheader("Descrivi la tua strategia")
+            st.caption(
+                "Scrivi in italiano come se stessi spiegando a un trader. "
+                "L'AI genera il codice per te."
+            )
+
+            description = st.text_area(
+                "Strategia",
+                placeholder=(
+                    "Es: Compra quando l'RSI scende sotto 30 e la media mobile a 50 giorni è in salita. "
+                    "Vendi quando l'RSI supera 70 oppure il prezzo scende del 5% dal massimo."
+                ),
+                height=150,
+                key="ai_description",
+            )
+
+            if st.button("Genera Codice", type="primary", key="btn_generate_ai"):
+                if not description.strip():
+                    st.warning("Scrivi prima la descrizione della strategia.")
                 else:
+                    with st.spinner("L'AI sta generando il codice..."):
+                        try:
+                            from dashboard.ai_generator import generate_strategy_from_description
+                            generated = generate_strategy_from_description(description)
+                            st.session_state["generated_code_ai"] = generated
+                        except ValueError as exc:
+                            st.error(str(exc))
+                        except Exception as exc:
+                            st.error(f"Errore nella generazione: {exc}")
+
+            if "generated_code_ai" in st.session_state:
+                st.subheader("Codice generato")
+                st.caption("Puoi modificarlo prima di salvarlo.")
+
+                if _ACE_AVAILABLE:
+                    code_ai = st_ace(
+                        value=st.session_state["generated_code_ai"],
+                        language="python",
+                        theme="monokai",
+                        height=400,
+                        key="ai_editor",
+                    )
+                else:
+                    code_ai = st.text_area(
+                        "Codice",
+                        value=st.session_state["generated_code_ai"],
+                        height=400,
+                        key="ai_editor_fallback",
+                    )
+
+                _render_validate_save(code_ai, "ai")
+
+        # ---- Tab 3: wizard guidato → AI ----
+        with tab_wizard:
+            st.subheader("Crea strategia guidata")
+            st.caption("Rispondi alle domande e l'AI costruisce la strategia per te.")
+
+            with st.form("wizard_form"):
+                wiz_name = st.text_input("Nome della strategia", value="Mia Strategia")
+
+                wiz_indicator = st.selectbox(
+                    "Indicatore principale",
+                    [
+                        "RSI",
+                        "SMA (Media Mobile)",
+                        "EMA (Media Mobile Esponenziale)",
+                        "MACD",
+                        "Bollinger Bands",
+                        "Stochastic",
+                        "ATR",
+                        "Personalizzato",
+                    ],
+                )
+
+                wiz_entry = st.text_area(
+                    "Quando COMPRARE?",
+                    placeholder=(
+                        "Es: quando RSI scende sotto 30\n"
+                        "Es: quando il prezzo rompe al rialzo la banda superiore di Bollinger"
+                    ),
+                    height=100,
+                )
+
+                wiz_exit = st.text_area(
+                    "Quando VENDERE?",
+                    placeholder=(
+                        "Es: quando RSI supera 70\n"
+                        "Es: quando la media mobile cambia direzione"
+                    ),
+                    height=100,
+                )
+
+                wiz_stop_loss = st.select_slider(
+                    "Stop Loss",
+                    options=["No stop loss", "1%", "2%", "3%", "5%", "10%"],
+                    value="No stop loss",
+                )
+
+                wiz_notes = st.text_input(
+                    "Note aggiuntive (opzionale)",
+                    placeholder="Es: opera solo su timeframe giornaliero, evita i venerdì...",
+                )
+
+                submitted = st.form_submit_button("Genera Strategia", type="primary")
+
+            if submitted:
+                with st.spinner("L'AI sta costruendo la tua strategia..."):
                     try:
-                        cls = _validate_code(code)
-                        dest = CUSTOM_DIR / f"{cls.__name__}.py"
-                        dest.write_text(code, encoding="utf-8")
-                        discover()
-                        st.success(
-                            f"Strategia '{cls.name}' salvata! "
-                            "Torna al Backtest per usarla."
-                        )
-                        st.download_button(
-                            "Download .py",
-                            data=code,
-                            file_name=f"{cls.__name__}.py",
-                            mime="text/plain",
-                        )
+                        from dashboard.ai_generator import generate_strategy_from_wizard
+                        answers = {
+                            "name": wiz_name,
+                            "indicator": wiz_indicator,
+                            "entry": wiz_entry,
+                            "exit": wiz_exit,
+                            "stop_loss": wiz_stop_loss,
+                            "notes": wiz_notes,
+                        }
+                        generated = generate_strategy_from_wizard(answers)
+                        st.session_state["generated_code_wizard"] = generated
                     except ValueError as exc:
                         st.error(str(exc))
                     except Exception as exc:
-                        st.error(f"Errore nel salvataggio: {exc}")
+                        st.error(f"Errore: {exc}")
+
+            if "generated_code_wizard" in st.session_state:
+                st.subheader("Strategia generata")
+                st.caption("Puoi modificarla prima di salvarla.")
+
+                if _ACE_AVAILABLE:
+                    code_wizard = st_ace(
+                        value=st.session_state["generated_code_wizard"],
+                        language="python",
+                        theme="monokai",
+                        height=400,
+                        key="wizard_editor",
+                    )
+                else:
+                    code_wizard = st.text_area(
+                        "Codice",
+                        value=st.session_state["generated_code_wizard"],
+                        height=400,
+                        key="wizard_editor_fallback",
+                    )
+
+                _render_validate_save(code_wizard, "wizard")
 
 
 # ---------------------------------------------------------------------------
