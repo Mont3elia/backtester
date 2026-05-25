@@ -1,4 +1,3 @@
-from collections import deque
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -12,9 +11,9 @@ if TYPE_CHECKING:
     from engine.portfolio import Portfolio
 
 
-class SMACrossover(BaseStrategy):
-    name = "SMA Crossover"
-    description = "Golden/death cross tra due medie mobili semplici"
+class EMACrossover(BaseStrategy):
+    name = "EMA Crossover"
+    description = "Golden/death cross tra due medie mobili esponenziali"
     param_schema = {
         "fast_period": {"type": "int", "default": 20, "min": 2, "max": 200, "label": "Fast Period"},
         "slow_period": {"type": "int", "default": 50, "min": 5, "max": 500, "label": "Slow Period"},
@@ -22,57 +21,54 @@ class SMACrossover(BaseStrategy):
 
     def __init__(self, symbol: str, **kwargs):
         super().__init__(symbol, **kwargs)
-        self._prices: deque = deque(maxlen=self.params["slow_period"])
+        self._fast_ema: float = None
+        self._slow_ema: float = None
         self._prev_fast: float = None
         self._prev_slow: float = None
+        self._bar_count: int = 0
 
     def _on_reset(self):
-        self._prices = deque(maxlen=self.params.get("slow_period", 50))
+        self._fast_ema = None
+        self._slow_ema = None
         self._prev_fast = None
         self._prev_slow = None
+        self._bar_count = 0
 
-    def _sma(self, n: int) -> float:
-        if len(self._prices) < n:
-            return None
-        return sum(list(self._prices)[-n:]) / n
+    def _update_ema(self, prev_ema: float, price: float, period: int) -> float:
+        alpha = 2.0 / (period + 1)
+        if prev_ema is None:
+            return price
+        return alpha * price + (1 - alpha) * prev_ema
 
     def on_bar(self, bar: pd.Series, portfolio: "Portfolio"):
         self._current_bar = bar
         self._current_timestamp = bar.name if hasattr(bar, "name") else pd.Timestamp.now()
 
-        self._prices.append(bar["close"])
-
+        price = bar["close"]
         fast = self.params["fast_period"]
         slow = self.params["slow_period"]
 
-        fast_sma = self._sma(fast)
-        slow_sma = self._sma(slow)
+        self._bar_count += 1
 
-        if fast_sma is None or slow_sma is None:
-            self._prev_fast = fast_sma
-            self._prev_slow = slow_sma
+        self._prev_fast = self._fast_ema
+        self._prev_slow = self._slow_ema
+
+        self._fast_ema = self._update_ema(self._fast_ema, price, fast)
+        self._slow_ema = self._update_ema(self._slow_ema, price, slow)
+
+        if self._bar_count <= slow:
             return
 
-        bullish_cross = (
-            self._prev_fast is not None
-            and self._prev_slow is not None
-            and self._prev_fast <= self._prev_slow
-            and fast_sma > slow_sma
-        )
-        bearish_cross = (
-            self._prev_fast is not None
-            and self._prev_slow is not None
-            and self._prev_fast >= self._prev_slow
-            and fast_sma < slow_sma
-        )
+        if self._prev_fast is None or self._prev_slow is None:
+            return
+
+        bullish_cross = self._prev_fast <= self._prev_slow and self._fast_ema > self._slow_ema
+        bearish_cross = self._prev_fast >= self._prev_slow and self._fast_ema < self._slow_ema
 
         if bullish_cross and not portfolio.has_position(self.symbol):
-            quantity = portfolio.cash / bar["close"]
+            quantity = portfolio.cash / price
             if quantity > 1e-8:
                 self.buy(quantity)
 
         elif bearish_cross and portfolio.has_position(self.symbol):
             self.close_position(portfolio)
-
-        self._prev_fast = fast_sma
-        self._prev_slow = slow_sma

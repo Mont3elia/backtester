@@ -13,8 +13,17 @@ if TYPE_CHECKING:
 
 
 class RSIStrategy(BaseStrategy):
-    def __init__(self, symbol: str, period: int = 14, oversold: float = 30.0, overbought: float = 70.0):
-        super().__init__(symbol, params={"period": period, "oversold": oversold, "overbought": overbought})
+    name = "RSI Strategy"
+    description = "Entra in ipervenduto, esce in ipercomprato"
+    param_schema = {
+        "period": {"type": "int", "default": 14, "min": 2, "max": 100, "label": "RSI Period"},
+        "oversold": {"type": "float", "default": 30.0, "min": 5.0, "max": 50.0, "label": "Oversold"},
+        "overbought": {"type": "float", "default": 70.0, "min": 50.0, "max": 95.0, "label": "Overbought"},
+    }
+
+    def __init__(self, symbol: str, **kwargs):
+        super().__init__(symbol, **kwargs)
+        period = self.params["period"]
         self._prices: deque = deque(maxlen=period + 1)
         self._avg_gain: float = None
         self._avg_loss: float = None

@@ -29,17 +29,19 @@ class DataManager:
         market = market.lower()
 
         if market == "stock":
-            df = yfinance_fetch(symbol, start, end, interval)
+            df = yfinance_fetch(symbol, start, end, interval, market=market)
         elif market == "crypto":
             df = ccxt_fetch(symbol, start, end, interval, exchange=exchange)
         elif market == "forex":
-            df = yfinance_fetch(symbol, start, end, interval)
+            df = yfinance_fetch(symbol, start, end, interval, market=market)
+        elif market == "futures":
+            df = yfinance_fetch(symbol, start, end, interval, market=market)
         elif market == "csv":
             if not filepath:
                 raise ValueError("filepath must be provided for market='csv'")
             df = csv_fetch(filepath, start=start, end=end)
         else:
-            raise ValueError(f"Unknown market type: '{market}'. Choose from: stock, crypto, forex, csv")
+            raise ValueError(f"Unknown market type: '{market}'. Choose from: stock, crypto, forex, futures, csv")
 
         self._cache[cache_key] = df
         return df

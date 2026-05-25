@@ -4,9 +4,17 @@ import yfinance as yf
 VALID_INTERVALS = {"1m", "5m", "15m", "1h", "1d", "1wk"}
 
 
-def fetch(symbol: str, start: str, end: str, interval: str = "1d") -> pd.DataFrame:
+def fetch(symbol: str, start: str, end: str, interval: str = "1d", market: str = "stock") -> pd.DataFrame:
     if interval not in VALID_INTERVALS:
         raise ValueError(f"Interval '{interval}' not supported. Choose from: {VALID_INTERVALS}")
+
+    market = market.lower()
+    if market == "forex":
+        if not symbol.endswith("=X"):
+            symbol = symbol + "=X"
+    elif market == "futures":
+        if not symbol.endswith("=F"):
+            symbol = symbol + "=F"
 
     ticker = yf.Ticker(symbol)
     df = ticker.history(start=start, end=end, interval=interval, auto_adjust=True)

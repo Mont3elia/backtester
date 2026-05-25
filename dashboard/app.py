@@ -10,8 +10,7 @@ import streamlit as st
 
 from data.data_manager import DataManager
 from engine.backtester import Backtester
-from strategies.examples.sma_crossover import SMACrossover
-from strategies.examples.rsi_strategy import RSIStrategy
+from strategies.registry import discover, get_all
 
 st.set_page_config(
     page_title="Backtester Pro",
@@ -39,25 +38,38 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# Run strategy discovery once at module load (cached by _registry)
+discover()
+
 
 def sidebar_config():
     st.sidebar.title("Backtester Pro")
 
     st.sidebar.header("Dati")
-    market = st.sidebar.selectbox("Mercato", ["Stock", "Crypto", "CSV"], index=0)
+    market_label = st.sidebar.selectbox(
+        "Mercato",
+        ["Azioni", "Crypto", "Forex", "Futures"],
+        index=0,
+    )
 
-    if market == "Stock":
-        symbol = st.sidebar.text_input("Simbolo", value="AAPL")
-        filepath = None
-        exchange = "binance"
-    elif market == "Crypto":
-        symbol = st.sidebar.text_input("Simbolo", value="BTC/USDT")
+    exchange = "binance"
+    filepath = None
+
+    if market_label == "Azioni":
+        market = "stock"
+        symbol = st.sidebar.text_input("Simbolo", value="AAPL", placeholder="AAPL")
+    elif market_label == "Crypto":
+        market = "crypto"
+        symbol = st.sidebar.text_input("Simbolo", value="BTC/USDT", placeholder="BTC/USDT")
         exchange = st.sidebar.selectbox("Exchange", ["binance", "coinbase", "kraken", "okx"], index=0)
-        filepath = None
-    else:
-        filepath = st.sidebar.text_input("Percorso CSV", value="")
-        symbol = st.sidebar.text_input("Simbolo (etichetta)", value="ASSET")
-        exchange = "binance"
+    elif market_label == "Forex":
+        market = "forex"
+        symbol = st.sidebar.text_input("Simbolo", value="EURUSD", placeholder="EURUSD")
+        st.sidebar.caption("es. EURUSD, GBPJPY, USDJPY")
+    else:  # Futures
+        market = "futures"
+        symbol = st.sidebar.text_input("Simbolo", value="ES", placeholder="ES")
+        st.sidebar.caption("es. ES, NQ, CL, GC")
 
     default_end = date.today()
     default_start = default_end - timedelta(days=730)
@@ -68,16 +80,37 @@ def sidebar_config():
     timeframe = st.sidebar.selectbox("Timeframe", timeframe_opts, index=0)
 
     st.sidebar.header("Strategia")
-    strategy_name = st.sidebar.selectbox("Strategia", ["SMA Crossover", "RSI Strategy"], index=0)
+    strategies = get_all()
+    strategy_names = list(strategies.keys())
+    strategy_name = st.sidebar.selectbox("Strategia", strategy_names, index=0)
+    strategy_cls = strategies[strategy_name]
+
+    if strategy_cls.description:
+        st.sidebar.caption(strategy_cls.description)
 
     strategy_params = {}
-    if strategy_name == "SMA Crossover":
-        strategy_params["fast_period"] = st.sidebar.number_input("Fast Period", min_value=2, max_value=200, value=20, step=1)
-        strategy_params["slow_period"] = st.sidebar.number_input("Slow Period", min_value=2, max_value=500, value=50, step=1)
-    else:
-        strategy_params["period"] = st.sidebar.number_input("RSI Period", min_value=2, max_value=100, value=14, step=1)
-        strategy_params["oversold"] = st.sidebar.slider("Oversold Level", min_value=5, max_value=50, value=30)
-        strategy_params["overbought"] = st.sidebar.slider("Overbought Level", min_value=50, max_value=95, value=70)
+    if strategy_cls.param_schema:
+        for param, schema in strategy_cls.param_schema.items():
+            if schema["type"] == "int":
+                val = st.sidebar.number_input(
+                    schema["label"],
+                    min_value=schema["min"],
+                    max_value=schema["max"],
+                    value=schema["default"],
+                    step=1,
+                )
+                strategy_params[param] = int(val)
+            elif schema["type"] == "float":
+                val = st.sidebar.slider(
+                    schema["label"],
+                    min_value=float(schema["min"]),
+                    max_value=float(schema["max"]),
+                    value=float(schema["default"]),
+                )
+                strategy_params[param] = float(val)
+            elif schema["type"] == "bool":
+                val = st.sidebar.checkbox(schema["label"], value=schema["default"])
+                strategy_params[param] = bool(val)
 
     st.sidebar.header("Configurazione")
     capital = st.sidebar.number_input("Capitale iniziale ($)", min_value=100, max_value=10_000_000, value=10_000, step=100)
@@ -95,6 +128,7 @@ def sidebar_config():
         "end": str(end_date),
         "timeframe": timeframe,
         "strategy_name": strategy_name,
+        "strategy_cls": strategy_cls,
         "strategy_params": strategy_params,
         "capital": capital,
         "commission": commission,
@@ -181,7 +215,7 @@ def build_trades_df(trades: list) -> pd.DataFrame:
             "Timestamp": t.get("timestamp"),
             "Tipo": t.get("side", "").upper(),
             "Prezzo": f"${t.get('price', 0):.4f}",
-            "Quantità": f"{t.get('quantity', 0):.6f}",
+            "Quantita": f"{t.get('quantity', 0):.6f}",
             "P&L ($)": f"{pnl:+.2f}" if pnl is not None else "-",
             "P&L (%)": f"{pnl_pct:+.2f}%" if pnl_pct is not None else "-",
         })
@@ -281,7 +315,7 @@ def main():
             dm = DataManager()
             data = dm.get(
                 symbol=config["symbol"],
-                market=config["market"].lower(),
+                market=config["market"],
                 start=config["start"],
                 end=config["end"],
                 interval=config["timeframe"],
@@ -296,26 +330,15 @@ def main():
         st.error("I dati scaricati sono vuoti. Verificare simbolo e date.")
         return
 
-    st.success(f"Dati caricati: {len(data)} barre ({data.index[0].date()} → {data.index[-1].date()})")
+    st.success(f"Dati caricati: {len(data)} barre ({data.index[0].date()} - {data.index[-1].date()})")
 
     with st.spinner("Esecuzione backtest..."):
         try:
-            params = config["strategy_params"]
+            strategy_cls = config["strategy_cls"]
             symbol = config["symbol"]
+            strategy_params = config["strategy_params"]
 
-            if config["strategy_name"] == "SMA Crossover":
-                strategy = SMACrossover(
-                    symbol=symbol,
-                    fast_period=int(params["fast_period"]),
-                    slow_period=int(params["slow_period"]),
-                )
-            else:
-                strategy = RSIStrategy(
-                    symbol=symbol,
-                    period=int(params["period"]),
-                    oversold=float(params["oversold"]),
-                    overbought=float(params["overbought"]),
-                )
+            strategy = strategy_cls(symbol=symbol, **strategy_params)
 
             bt = Backtester(
                 initial_capital=float(config["capital"]),

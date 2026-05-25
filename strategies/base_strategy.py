@@ -13,12 +13,24 @@ if TYPE_CHECKING:
 
 
 class BaseStrategy(ABC):
-    def __init__(self, symbol: str, params: dict = None):
+    name: str = "Base"
+    description: str = ""
+    param_schema: dict = {}
+
+    def __init__(self, symbol: str, **kwargs):
         self.symbol = symbol
-        self.params = params or {}
+        self.params: dict = {}
         self.orders: List[Order] = []
         self._current_bar: pd.Series = None
         self._current_timestamp: pd.Timestamp = None
+
+        for key, schema in self.__class__.param_schema.items():
+            if key in kwargs:
+                value = kwargs[key]
+            else:
+                value = schema.get("default")
+            self.params[key] = value
+            setattr(self, key, value)
 
     def reset(self):
         self.orders = []
